@@ -1,5 +1,5 @@
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, func
-from sqlalchemy.orm import declarative_base
+from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime, date
 from dataclasses import dataclass
@@ -24,8 +24,12 @@ class EvaluationDTO:
     image_file_id: Optional[str]
     timestamp: datetime
     reminder_enabled: bool
-    reminder_time: Optional[str]
     last_reminder_sent: Optional[datetime]
+
+@dataclass
+class DailyJobStateDTO:
+    job_name: str
+    scheduled_time: datetime
 
 class Evaluation(Base):
     __tablename__ = 'evaluations'
@@ -36,11 +40,17 @@ class Evaluation(Base):
     image_file_id = Column(String, nullable=True) # Telegram file_id
     timestamp = Column(DateTime, default=datetime.utcnow)
     reminder_enabled = Column(Boolean, default=False)
-    reminder_time = Column(String, nullable=True) # e.g., "05:00"
     last_reminder_sent = Column(DateTime, nullable=True) # Tracks the last time a reminder was sent
 
     def __repr__(self):
         return f"<Evaluation(id={self.id}, user_id={self.user_id}, text='{self.text_note[:20]}...')>"
+
+class DailyJobState(Base):
+    __tablename__ = 'daily_job_state'
+    job_name = Column(String, primary_key=True)
+    scheduled_time = Column(DateTime, nullable=False)
+
+
 
 # For SQLite, we need to allow access from multiple threads (main bot thread and scheduler thread)
 connect_args = {}
@@ -87,7 +97,6 @@ def save_evaluation(user_id, text_note=None, image_file_id=None) -> Optional[Eva
                 image_file_id=evaluation.image_file_id,
                 timestamp=evaluation.timestamp,
                 reminder_enabled=evaluation.reminder_enabled,
-                reminder_time=evaluation.reminder_time,
                 last_reminder_sent=evaluation.last_reminder_sent
             )
             logger.info(f"Successfully saved evaluation with ID {evaluation.id} for user {user_id}.")
@@ -110,7 +119,6 @@ def get_all_evaluations(user_id) -> list[EvaluationDTO]:
                     image_file_id=eval.image_file_id,
                     timestamp=eval.timestamp,
                     reminder_enabled=eval.reminder_enabled,
-                    reminder_time=eval.reminder_time,
                     last_reminder_sent=eval.last_reminder_sent
                 ) for eval in evaluations
             ]
@@ -132,7 +140,6 @@ def get_evaluation_by_id(evaluation_id: int, user_id: int) -> Optional[Evaluatio
                     image_file_id=eval_item.image_file_id,
                     timestamp=eval_item.timestamp,
                     reminder_enabled=eval_item.reminder_enabled,
-                    reminder_time=eval_item.reminder_time,
                     last_reminder_sent=eval_item.last_reminder_sent
                 )
             return None
@@ -141,59 +148,21 @@ def get_evaluation_by_id(evaluation_id: int, user_id: int) -> Optional[Evaluatio
         logger.error(f"Could not fetch evaluation {evaluation_id} for user {user_id}.")
         return None
 
-def get_missed_reminders(now: datetime) -> list[EvaluationDTO]:
-    """
-    Fetches evaluations that have a reminder time that has passed today
-    and for which a reminder has not yet been sent today.
-    """
-    today_utc_date = now.date()
-    # The time is stored as 'HH:MM' string, so we compare it as a string.
-    current_time_str = now.strftime('%H:%M')
-
+def get_all_active_reminders() -> list[EvaluationDTO]:
+    """Fetches all evaluations with reminder_enabled set to True."""
     try:
         with session_scope() as session:
-            evaluations = session.query(Evaluation).filter(
-                Evaluation.reminder_enabled == True,
-                Evaluation.reminder_time != None,
-                Evaluation.reminder_time < current_time_str,
-                (Evaluation.last_reminder_sent == None) | (func.date(Evaluation.last_reminder_sent) < today_utc_date)
-            ).all()
-            
+            evaluations = session.query(Evaluation).filter_by(reminder_enabled=True).all()
             return [
                 EvaluationDTO(
                     id=eval.id, user_id=eval.user_id, text_note=eval.text_note,
                     image_file_id=eval.image_file_id, timestamp=eval.timestamp,
-                    reminder_enabled=eval.reminder_enabled, reminder_time=eval.reminder_time,
+                    reminder_enabled=eval.reminder_enabled,
                     last_reminder_sent=eval.last_reminder_sent
                 ) for eval in evaluations
             ]
     except Exception:
-        logger.error(f"Failed to fetch missed reminders due to a database error.")
-        return []
-
-def get_due_reminders(time_str: str) -> list[EvaluationDTO]:
-    """Fetches all enabled reminders scheduled for a specific time."""
-    try:
-        with session_scope() as session:
-            today_utc = datetime.utcnow().date()
-            # Ambil evaluasi yang waktunya cocok, belum dikirimi pengingat hari ini,
-            # dan urutkan berdasarkan yang paling lama tidak dikirimi pengingat.
-            evaluations = session.query(Evaluation).filter(
-                Evaluation.reminder_enabled == True,
-                Evaluation.reminder_time == time_str,
-                (Evaluation.last_reminder_sent == None) | (func.date(Evaluation.last_reminder_sent) < today_utc)
-            ).order_by(Evaluation.last_reminder_sent.asc().nullsfirst()).all()
-            
-            return [
-                EvaluationDTO(
-                    id=eval.id, user_id=eval.user_id, text_note=eval.text_note,
-                    image_file_id=eval.image_file_id, timestamp=eval.timestamp,
-                    reminder_enabled=eval.reminder_enabled, reminder_time=eval.reminder_time,
-                    last_reminder_sent=eval.last_reminder_sent
-                ) for eval in evaluations
-            ]
-    except Exception:
-        logger.error(f"Failed to fetch due reminders for time {time_str} due to a database error.")
+        logger.error("Failed to fetch all active reminders due to a database error.")
         return []
 
 def delete_evaluation(evaluation_id, user_id):
@@ -214,7 +183,7 @@ def delete_evaluation(evaluation_id, user_id):
         logger.error(f"Failed to delete evaluation ID {evaluation_id} for user {user_id} due to a database error.")
         return False
 
-def update_evaluation_reminder(evaluation_id, enabled, time=None):
+def update_evaluation_reminder(evaluation_id, enabled):
     """Updates the reminder status for a given evaluation and returns True on success."""
     try:
         with session_scope() as session:
@@ -224,7 +193,6 @@ def update_evaluation_reminder(evaluation_id, enabled, time=None):
                 return False # Not found
             
             evaluation.reminder_enabled = enabled
-            evaluation.reminder_time = time if enabled else None
             if not enabled:
                 evaluation.last_reminder_sent = None
             
@@ -242,3 +210,33 @@ def update_last_reminder_sent(evaluation_id):
                 evaluation.last_reminder_sent = datetime.utcnow()
     except Exception:
         logger.error(f"Failed to update last_reminder_sent for evaluation ID {evaluation_id} due to a database error.")
+
+def get_or_create_job_state(job_name: str) -> DailyJobStateDTO:
+    """Gets the state for a job, creating it if it doesn't exist."""
+    try:
+        with session_scope() as session:
+            job_state = session.query(DailyJobState).filter_by(job_name=job_name).first()
+            if not job_state:
+                # Create a default state in the past to trigger scheduling on first run
+                job_state = DailyJobState(job_name=job_name, scheduled_time=datetime(1970, 1, 1))
+                session.add(job_state)
+                logger.info(f"Created initial state for job '{job_name}'.")
+            return DailyJobStateDTO(job_name=job_state.job_name, scheduled_time=job_state.scheduled_time)
+    except Exception:
+        logger.error(f"Failed to get or create state for job '{job_name}'.")
+        # Return a default past date on error to allow the bot to attempt to run
+        return DailyJobStateDTO(job_name=job_name, scheduled_time=datetime(1970, 1, 1))
+
+def update_job_state(job_name: str, new_scheduled_time: datetime):
+    """Updates the scheduled time for a job."""
+    try:
+        with session_scope() as session:
+            job_state = session.query(DailyJobState).filter_by(job_name=job_name).first()
+            if job_state:
+                job_state.scheduled_time = new_scheduled_time
+                logger.info(f"Updated scheduled time for job '{job_name}' to {new_scheduled_time}.")
+                return True
+            return False
+    except Exception:
+        logger.error(f"Failed to update state for job '{job_name}'.")
+        return False

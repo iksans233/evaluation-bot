@@ -1,5 +1,13 @@
+# Python cache & virtualenv
 __pycache__/
-*.pyc
-bot_persistence.pickle
-evaluations.db
-*.env
+*.py[cod]
+.venv/
+env/
+venv/
+
+# Cloudflared
+*.cloudflared/*.json
+
+# Env secrets
+.env
+

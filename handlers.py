@@ -9,7 +9,7 @@ import message_formatter # Import the new module
 logger = logging.getLogger(__name__)
 
 # States for conversation handler
-TEXT_NOTE, IMAGE_NOTE, REMINDER_TIME = range(3) # Tambahkan REMINDER_TIME
+TEXT_NOTE, IMAGE_NOTE = range(2)
 
 def _create_evaluation_keyboard(eval_item: database.EvaluationDTO) -> InlineKeyboardMarkup:
     """Helper function to create the dynamic inline keyboard for an evaluation."""
@@ -17,12 +17,9 @@ def _create_evaluation_keyboard(eval_item: database.EvaluationDTO) -> InlineKeyb
     first_row = []
     
     if eval_item.reminder_enabled:
-        # If reminder is active, show buttons to change or disable it
-        first_row.append(InlineKeyboardButton("Ubah Waktu", callback_data=f"set_reminder_{eval_item.id}"))
-        first_row.append(InlineKeyboardButton("🚫 Nonaktifkan", callback_data=f"disable_reminder_{eval_item.id}"))
+        first_row.append(InlineKeyboardButton("🚫 Nonaktifkan Pengingat", callback_data=f"disable_reminder_{eval_item.id}"))
     else:
-        # If reminder is inactive, show a button to set it
-        first_row.append(InlineKeyboardButton("🔔 Atur Pengingat", callback_data=f"set_reminder_{eval_item.id}"))
+        first_row.append(InlineKeyboardButton("🔔 Aktifkan Pengingat", callback_data=f"enable_reminder_{eval_item.id}"))
         
     keyboard.append(first_row)
     # The delete button is always present on its own row for safety and clarity
@@ -90,17 +87,11 @@ async def receive_image_note(update: Update, context: CallbackContext) -> int:
             return ConversationHandler.END
 
         evaluation = database.save_evaluation(user_id, text_note, image_file_id)        
-        
         if evaluation:
-            # Simpan ID evaluasi untuk langkah selanjutnya (mengatur pengingat)
-            context.user_data['current_evaluation_id_for_reminder'] = evaluation.id
-            await update.message.reply_html( # Gunakan HTML untuk formatting
+            await update.message.reply_html(
                 f"✅ Evaluasi Anda telah disimpan! <b>ID: {evaluation.id}</b>\n\n"
-                "Sekarang, pada jam berapa <b>UTC</b> Anda ingin diingatkan setiap hari? "
-                "Mohon masukkan dalam format <code>HH:MM</code> (contoh: <code>08:30</code>).\n\n"
-                "Ketik /skip untuk melewati langkah ini."
+                "Anda dapat mengaktifkan pengingat harian acak dari /list_evaluations."
             )
-            return REMINDER_TIME # Lanjut ke state pengaturan pengingat
         else:
             await update.message.reply_html( # Gunakan HTML untuk formatting
                 "❌ Maaf, terjadi kesalahan saat menyimpan evaluasi Anda. Silakan coba lagi."
@@ -122,14 +113,6 @@ async def cancel_command(update: Update, context: CallbackContext) -> int:
     # Clear all temporary data to prevent state leakage between different conversations
     context.user_data.clear()
     return ConversationHandler.END
-    
-async def skip_reminder(update: Update, context: CallbackContext) -> int:
-    """Skips the reminder setting step, clears temporary data, and ends the conversation."""
-    logger.info("skip_reminder called. User: %s.", update.effective_user.id)
-    await update.message.reply_html("👍 Pengaturan pengingat dilewati. Anda bisa mengaturnya nanti dari /list_evaluations.")
-    # Clear all temporary data to ensure a clean state for the next conversation
-    context.user_data.clear()
-    return ConversationHandler.END
 
 async def unknown_command_in_conv(update: Update, context: CallbackContext) -> None:
     """Handles any unknown command sent during a conversation."""
@@ -138,97 +121,6 @@ async def unknown_command_in_conv(update: Update, context: CallbackContext) -> N
         "Silakan selesaikan operasi tersebut, atau ketik /cancel untuk membatalkan."
     )
     # We return None, so the conversation state does not change.
-
-
-async def set_reminder_entry_point(update: Update, context: CallbackContext) -> int:
-    """Entry point for setting a reminder via callback query."""
-    logger.info("set_reminder_entry_point called.")
-    query = update.callback_query
-    if not query:
-        logger.error("set_reminder_entry_point called without a callback query.")
-        return ConversationHandler.END
-
-    logger.info(f"Callback query data: {query.data}")
-    await query.answer() # Acknowledge the button press
-
-    evaluation_id = int(query.data.split("_")[2])
-    context.user_data['current_evaluation_id_for_reminder'] = evaluation_id
-    context.user_data['message_to_edit_id'] = query.message.message_id # Store message ID for editing
-    logger.info(f"Stored evaluation ID {evaluation_id} and message ID {query.message.message_id} for reminder setup.")
-
-    try:
-        # Edit pesan yang ada untuk menanyakan waktu, ini lebih rapi daripada mengirim pesan baru
-        await query.edit_message_text(
-            text="⏰ Pada jam berapa <b>UTC</b> Anda ingin diingatkan setiap hari? "
-            "Mohon masukkan dalam format <code>HH:MM</code> (contoh: <code>08:30</code>).\n\n"
-            "<i>Ketik /cancel untuk membatalkan.</i>",
-            parse_mode='HTML'
-        )
-        logger.info(f"Message edited successfully for reminder time request for eval ID {evaluation_id}.")
-    except Exception as e:
-        logger.error(f"Failed to edit message in set_reminder_entry_point for eval ID {evaluation_id}: {e}")
-        await query.message.reply_text("Maaf, terjadi kesalahan saat mencoba mengubah pesan. Silakan coba lagi.")
-        return ConversationHandler.END # End conversation if message edit fails
-
-    logger.info("User %s initiated reminder setting for eval ID %s. Asking for time.",
-                update.effective_user.id, evaluation_id)
-    return REMINDER_TIME
-
-async def receive_reminder_time(update: Update, context: CallbackContext) -> int:
-    """Receives the reminder time from the user and sets the reminder."""
-    user_id = update.effective_user.id
-    evaluation_id = context.user_data.get('current_evaluation_id_for_reminder')
-    message_to_edit_id = context.user_data.pop('message_to_edit_id', None)
-    input_time_str = update.message.text.strip()
-
-    if not evaluation_id:
-        logger.warning("receive_reminder_time called without evaluation_id in user_data for user %s.", user_id)
-        await update.message.reply_html("❌ Terjadi kesalahan: ID evaluasi tidak ditemukan. Silakan coba lagi dari /list_evaluations.")
-        return ConversationHandler.END
-
-    # Validate time format HH:MM
-    try:
-        # Use strptime to parse and validate
-        dt_time = datetime.strptime(input_time_str, '%H:%M').time()
-        reminder_time_str = dt_time.strftime('%H:%M') # Pastikan format konsisten
-    except ValueError:
-        logger.info("Invalid time format '%s' from user %s. Re-asking.", input_time_str, user_id)
-        await update.message.reply_html( # Gunakan HTML untuk formatting
-            "⏰ Format waktu tidak valid. Mohon masukkan dalam format <code>HH:MM</code> (contoh: <code>08:30</code>).\n"
-            "Ketik /cancel untuk membatalkan."
-        )
-        return REMINDER_TIME # Stay in the same state to re-ask
-
-    success = database.update_evaluation_reminder(evaluation_id, True, reminder_time_str)
-    
-    if success:
-        logger.info("Reminder set for eval ID %s at %s UTC for user %s.", evaluation_id, reminder_time_str, user_id)
-        if message_to_edit_id:
-            # Context came from a button, so edit the original message
-            eval_item: database.EvaluationDTO = database.get_evaluation_by_id(evaluation_id, user_id)
-            if eval_item:
-                formatted_text, _ = message_formatter.format_evaluation_message(eval_item)
-                reply_markup = _create_evaluation_keyboard(eval_item)
-                await context.bot.edit_message_text(
-                    chat_id=user_id,
-                    message_id=message_to_edit_id,
-                    text=formatted_text,
-                    reply_markup=reply_markup,
-                    parse_mode='HTML'
-                )
-                # Delete the user's time input message for cleanliness
-                await update.message.delete()
-            else: # Fallback
-                await update.message.reply_html(f"✅ Pengingat untuk Evaluasi ID <b>{evaluation_id}</b> berhasil diatur pada <b>{reminder_time_str} UTC</b> setiap hari!")
-        else:
-            # Context came from /new_evaluation, send a new message
-            await update.message.reply_html(f"✅ Pengingat untuk Evaluasi ID <b>{evaluation_id}</b> berhasil diatur pada <b>{reminder_time_str} UTC</b> setiap hari!")
-    else:
-        await update.message.reply_html("❌ Maaf, terjadi kesalahan saat mengatur pengingat. Silakan coba lagi.")
-        logger.error("Failed to set reminder for eval ID %s at %s UTC for user %s.", evaluation_id, reminder_time_str, user_id)
-
-    context.user_data.pop('current_evaluation_id_for_reminder', None)
-    return ConversationHandler.END
 
 async def list_evaluations_command(update: Update, context: CallbackContext) -> None:
     """Lists all evaluations for the user."""
@@ -255,12 +147,11 @@ async def button_callback_handler(update: Update, context: CallbackContext) -> N
     logger.info(f"button_callback_handler received callback_data: {data}") # Tambahkan baris ini
     user_id = query.from_user.id # For security checks (tetap diperlukan untuk logika hapus)
 
-    # Logika "set_reminder_" sekarang ditangani oleh ConversationHandler di main.py
-    # Jadi, kita hanya perlu menangani "disable_reminder_" dan logika hapus di sini.
-
-    if data.startswith("disable_reminder_"):
+    if data.startswith("enable_reminder_") or data.startswith("disable_reminder_"):
+        is_enabling = data.startswith("enable_reminder_")
         evaluation_id = int(data.split("_")[2])
-        success = database.update_evaluation_reminder(evaluation_id, False)
+        success = database.update_evaluation_reminder(evaluation_id, is_enabling)
+        
         if success:
             # Refetch the updated evaluation to rebuild the message and keyboard
             eval_item: database.EvaluationDTO = database.get_evaluation_by_id(evaluation_id, user_id)
@@ -269,13 +160,13 @@ async def button_callback_handler(update: Update, context: CallbackContext) -> N
                 formatted_text, _ = message_formatter.format_evaluation_message(eval_item)
                 reply_markup = _create_evaluation_keyboard(eval_item)
                 await query.edit_message_text(text=formatted_text, reply_markup=reply_markup, parse_mode='HTML')
-                await query.answer("Pengingat dinonaktifkan!") # Give feedback via toast
+                feedback_text = "Pengingat diaktifkan!" if is_enabling else "Pengingat dinonaktifkan!"
+                await query.answer(feedback_text) # Give feedback via toast
             else:
                 # Fallback if refetch fails
-                await query.edit_message_text(f"🚫 Pengingat untuk Evaluasi ID <b>{evaluation_id}</b> telah dinonaktifkan.", parse_mode='HTML')
+                await query.edit_message_text(f"Status pengingat untuk Evaluasi ID <b>{evaluation_id}</b> telah diperbarui.", parse_mode='HTML')
         else:
-            await query.edit_message_text("❌ Gagal menonaktifkan pengingat.")
-            await query.answer("Gagal menonaktifkan pengingat.", show_alert=True)
+            await query.answer("Gagal memperbarui status pengingat.", show_alert=True)
 
     # --- Deletion Logic ---
     elif data.startswith("delete_eval_"):

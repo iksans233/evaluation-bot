@@ -4,9 +4,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# Konfigurasi untuk Webhook
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-WEBHOOK_PATH = os.getenv("WEBHOOK_PATH")
-PORT = int(os.getenv("PORT", 8081)) # Default to 8081 if not set
+# Menggunakan token bot sebagai path rahasia adalah praktik yang baik untuk keamanan.
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", BOT_TOKEN)
+PORT = int(os.getenv("PORT", 6000))
+
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///evaluations.db")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "1254951912")) # ID chat Anda
 

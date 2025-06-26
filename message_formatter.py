@@ -24,8 +24,7 @@ def format_evaluation_message(eval_item: EvaluationDTO, include_image_info: bool
             message_parts.append(f"📸 <b>Gambar:</b> Tidak ada")
 
     if include_reminder_info:
-        reminder_status = "Aktif" if eval_item.reminder_enabled else "Tidak Aktif"
-        reminder_time_str = f" pada {eval_item.reminder_time} UTC" if eval_item.reminder_time else ""
-        message_parts.append(f"🔔 <b>Pengingat:</b> {reminder_status}{reminder_time_str}")
+        reminder_status = "✅ Aktif" if eval_item.reminder_enabled else "❌ Tidak Aktif"
+        message_parts.append(f"🔔 <b>Pengingat Harian Acak:</b> {reminder_status}")
 
     return "\n".join(message_parts), eval_item.image_file_id
