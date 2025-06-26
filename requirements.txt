@@ -1,0 +1,7 @@
+python-telegram-bot[ext]
+apscheduler
+sqlalchemy
+fastapi
+uvicorn
+python-dotenv
+psycopg2-binary # Driver untuk PostgreSQL
